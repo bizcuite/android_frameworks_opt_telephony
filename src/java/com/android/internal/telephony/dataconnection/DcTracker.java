@@ -1355,6 +1355,7 @@ public class DcTracker extends Handler {
         boolean attachedState = mAttached.get();
         boolean desiredPowerState = mPhone.getServiceStateTracker().getDesiredPowerState();
         boolean radioStateFromCarrier = mPhone.getServiceStateTracker().getPowerStateFromCarrier();
+        boolean subscriptionFromNv = isNvSubscription();
         int radioTech = mPhone.getServiceState().getRilDataRadioTechnology();
         if (radioTech == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN) {
             desiredPowerState = true;
@@ -1389,6 +1390,10 @@ public class DcTracker extends Handler {
             if(failureReason == null) return false;
             failureReason.addDataAllowFailReason(DataAllowFailReasonType.NOT_ATTACHED);
         }
+            if (!recordsLoaded) reason += " - SIM not loaded";
+            if (!(subscriptionFromNv || recordsLoaded)) {
+                reason += " - SIM not loaded and not NV subscription";
+            }
         if (!(recordsLoaded || subscriptionFromNv)) {
             if(failureReason == null) return false;
             failureReason.addDataAllowFailReason(DataAllowFailReasonType.RECORD_NOT_LOADED);
@@ -2469,7 +2474,14 @@ public class DcTracker extends Handler {
         mAutoAttachOnCreationConfig = false;
     }
 
-    private void onSetDependencyMet(String apnType, boolean met) {
+    private void onNvReady() {
+        if (DBG) log("onNvReady");
+        createAllApnList();
+        setupDataOnConnectableApns(Phone.REASON_NV_READY);
+    }
+
+    @Override
+    protected void onSetDependencyMet(String apnType, boolean met) {
         // don't allow users to tweak hipri to work around default dependency not met
         if (PhoneConstants.APN_TYPE_HIPRI.equals(apnType)) return;
 
@@ -3339,6 +3351,19 @@ public class DcTracker extends Handler {
         notifyOffApnsOfAvailability(reason);
     }
 
+    private boolean isNvSubscription() {
+        int radioTech = mPhone.getServiceState().getRilVoiceRadioTechnology();
+        if (mCdmaSsm == null) {
+            return false;
+        }
+        if (UiccController.getFamilyFromRadioTechnology(radioTech) == UiccController.APP_FAM_3GPP2
+                && mCdmaSsm.getCdmaSubscriptionSource() ==
+                        CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_NV) {
+            return true;
+        }
+        return false;
+    }
+
     protected void setDataProfilesAsNeeded() {
         if (DBG) log("setDataProfilesAsNeeded");
         if (mAllApnSettings != null && !mAllApnSettings.isEmpty()) {
@@ -3363,6 +3388,23 @@ public class DcTracker extends Handler {
                 mPhone.mCi.setDataProfile(dps.toArray(new DataProfile[0]), null);
             }
         }
+    }
+
+    /**
+     * Returns mccmnc for data call either from cdma_home_operator or from IccRecords
+     * @return operator numeric
+     */
+    protected String getOperatorNumeric() {
+        String result;
+        if (isNvSubscription()) {
+            result = SystemProperties.get(CDMAPhone.PROPERTY_CDMA_HOME_OPERATOR_NUMERIC);
+            log("getOperatorNumberic - returning from NV: " + result);
+        } else {
+            IccRecords r = mIccRecords.get();
+            result = (r != null) ? r.getOperatorNumeric() : "";
+            log("getOperatorNumberic - returning from card: " + result);
+        }
+        return result;
     }
 
     /**
@@ -3827,9 +3869,15 @@ public class DcTracker extends Handler {
                 break;
 
             case DctConstants.EVENT_DATA_RAT_CHANGED:
-                //May new Network allow setupData, so try it here
-                setupDataOnConnectableApns(Phone.REASON_NW_TYPE_CHANGED,
-                        RetryFailures.ONLY_ON_CHANGE);
+                if (isNvSubscription()){
+                    // If cdma subscription source changed to NV or data rat changed to cdma
+                    // (while subscription source was NV) - we need to trigger NV ready
+                    onNvReady();
+                } else {
+                    //May new Network allow setupData, so try it here
+                    setupDataOnConnectableApns(Phone.REASON_NW_TYPE_CHANGED,
+                            RetryFailures.ONLY_ON_CHANGE);
+                }
                 break;
 
             case DctConstants.CMD_CLEAR_PROVISIONING_SPINNER:
